@@ -5,11 +5,25 @@ import type React from "react"
 import { useEffect, useRef, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Slider } from "@/components/ui/slider"
-import { Circle, ImageIcon, Pencil, Square, Minus, Undo2, Redo2, Trash2, Download, Users } from "lucide-react"
+import {
+  Circle,
+  ImageIcon,
+  Pencil,
+  Square,
+  Minus,
+  Undo2,
+  Redo2,
+  Trash2,
+  Download,
+  Users,
+  Type,
+  Eraser,
+} from "lucide-react"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import ColorPicker from "./color-picker"
 import ImageUploader from "./image-uploader"
 
-type Tool = "pencil" | "rectangle" | "circle" | "line" | "image" | "select"
+type Tool = "pencil" | "rectangle" | "circle" | "line" | "image" | "select" | "eraser" | "text"
 type DrawingElement = {
   id: string
   type: Tool
@@ -22,6 +36,10 @@ type DrawingElement = {
   lineWidth: number
   imageUrl?: string
   selected?: boolean
+  text?: string
+  fontSize?: number
+  fontFamily?: string
+  cachedImage?: HTMLImageElement
 }
 
 export default function Whiteboard() {
@@ -37,6 +55,12 @@ export default function Whiteboard() {
   const [startPoint, setStartPoint] = useState<{ x: number; y: number } | null>(null)
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
   const [selectedElement, setSelectedElement] = useState<DrawingElement | null>(null)
+  const [textInput, setTextInput] = useState<string>("")
+  const [fontSize, setFontSize] = useState<number>(16)
+  const [fontFamily, setFontFamily] = useState<string>("Arial")
+  const [showTextInput, setShowTextInput] = useState<boolean>(false)
+  const [textPosition, setTextPosition] = useState<{ x: number; y: number } | null>(null)
+  const textInputRef = useRef<HTMLTextAreaElement>(null)
 
   // Initialize canvas
   useEffect(() => {
@@ -202,17 +226,51 @@ export default function Whiteboard() {
           )
             return
 
-          const img = new Image()
-          img.src = element.imageUrl
-          img.crossOrigin = "anonymous"
+          // Use a cached image if possible to prevent reloading
+          if (!element.cachedImage) {
+            const img = new Image()
+            img.src = element.imageUrl
+            img.crossOrigin = "anonymous"
+            element.cachedImage = img
+          }
 
-          img.onload = () => {
-            ctx.drawImage(img, element.x!, element.y!, element.width!, element.height!)
+          if (element.cachedImage.complete) {
+            ctx.drawImage(element.cachedImage, element.x, element.y, element.width, element.height)
 
             // Draw selection handles if selected
             if (element.selected) {
               drawSelectionHandles(ctx, element)
             }
+          } else {
+            element.cachedImage.onload = () => {
+              ctx.drawImage(element.cachedImage!, element.x!, element.y!, element.width!, element.height!)
+
+              // Draw selection handles if selected
+              if (element.selected) {
+                drawSelectionHandles(ctx, element)
+              }
+            }
+          }
+          break
+
+        case "text":
+          if (element.x === undefined || element.y === undefined || element.text === undefined) return
+
+          ctx.font = `${element.fontSize || 16}px ${element.fontFamily || "Arial"}`
+          ctx.fillText(element.text, element.x, element.y)
+
+          // Draw selection handles if selected
+          if (element.selected) {
+            // Calculate text width and height
+            const metrics = ctx.measureText(element.text)
+            const textWidth = metrics.width
+            const textHeight = (element.fontSize || 16) * 1.2
+
+            drawSelectionHandles(ctx, {
+              ...element,
+              width: textWidth,
+              height: textHeight,
+            })
           }
           break
       }
@@ -268,6 +326,35 @@ export default function Whiteboard() {
     )
   }
 
+  // Handle text input
+  const handleTextInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setTextInput(e.target.value)
+  }
+
+  const handleTextInputBlur = () => {
+    if (textInput && textPosition) {
+      const newElement: DrawingElement = {
+        id: Date.now().toString(),
+        type: "text",
+        x: textPosition.x,
+        y: textPosition.y,
+        text: textInput,
+        fontSize,
+        fontFamily,
+        color,
+        lineWidth: 1,
+      }
+
+      setElements((prev) => [...prev, newElement])
+      setHistory((prev) => [...prev, elements])
+      setRedoStack([])
+    }
+
+    setShowTextInput(false)
+    setTextInput("")
+    setTextPosition(null)
+  }
+
   // Handle mouse down event
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!canvasRef.current) return
@@ -278,6 +365,79 @@ export default function Whiteboard() {
     const y = e.clientY - rect.top
 
     setStartPoint({ x, y })
+
+    if (tool === "text") {
+      setTextPosition({ x, y })
+      setShowTextInput(true)
+      setTimeout(() => {
+        if (textInputRef.current) {
+          textInputRef.current.focus()
+        }
+      }, 0)
+      return
+    }
+
+    if (tool === "eraser") {
+      // Find elements under the eraser
+      const elementToErase = elements.findIndex((el) => {
+        if (el.type === "pencil" && el.points) {
+          // For pencil, check if any point is close to the eraser
+          return el.points.some((point) => Math.sqrt(Math.pow(point.x - x, 2) + Math.pow(point.y - y, 2)) < 10)
+        } else if (el.x !== undefined && el.y !== undefined && el.width !== undefined && el.height !== undefined) {
+          // For shapes and images, check if the eraser is inside the element
+          return x >= el.x && x <= el.x + el.width && y >= el.y && y <= el.y + el.height
+        } else if (el.type === "line" && el.points) {
+          // For lines, check if the eraser is close to the line
+          const x1 = el.points[0].x
+          const y1 = el.points[0].y
+          const x2 = el.points[1].x
+          const y2 = el.points[1].y
+
+          // Calculate distance from point to line
+          const A = x - x1
+          const B = y - y1
+          const C = x2 - x1
+          const D = y2 - y1
+
+          const dot = A * C + B * D
+          const lenSq = C * C + D * D
+          let param = -1
+
+          if (lenSq !== 0) param = dot / lenSq
+
+          let xx, yy
+
+          if (param < 0) {
+            xx = x1
+            yy = y1
+          } else if (param > 1) {
+            xx = x2
+            yy = y2
+          } else {
+            xx = x1 + param * C
+            yy = y1 + param * D
+          }
+
+          const dx = x - xx
+          const dy = y - yy
+          const distance = Math.sqrt(dx * dx + dy * dy)
+
+          return distance < 10
+        }
+
+        return false
+      })
+
+      if (elementToErase !== -1) {
+        const newElements = [...elements]
+        newElements.splice(elementToErase, 1)
+        setElements(newElements)
+        setHistory((prev) => [...prev, elements])
+        setRedoStack([])
+      }
+
+      return
+    }
 
     if (tool === "select") {
       // Check if clicked on an element
@@ -342,6 +502,66 @@ export default function Whiteboard() {
     const rect = canvasRef.current.getBoundingClientRect()
     const x = e.clientX - rect.left
     const y = e.clientY - rect.top
+
+    if (tool === "eraser") {
+      // Find elements under the eraser
+      const elementToErase = elements.findIndex((el) => {
+        if (el.type === "pencil" && el.points) {
+          // For pencil, check if any point is close to the eraser
+          return el.points.some((point) => Math.sqrt(Math.pow(point.x - x, 2) + Math.pow(point.y - y, 2)) < 10)
+        } else if (el.x !== undefined && el.y !== undefined && el.width !== undefined && el.height !== undefined) {
+          // For shapes and images, check if the eraser is inside the element
+          return x >= el.x && x <= el.x + el.width && y >= el.y && y <= el.y + el.height
+        } else if (el.type === "line" && el.points) {
+          // For lines, check if the eraser is close to the line
+          const x1 = el.points[0].x
+          const y1 = el.points[0].y
+          const x2 = el.points[1].x
+          const y2 = el.points[1].y
+
+          // Calculate distance from point to line
+          const A = x - x1
+          const B = y - y1
+          const C = x2 - x1
+          const D = y2 - y1
+
+          const dot = A * C + B * D
+          const lenSq = C * C + D * D
+          let param = -1
+
+          if (lenSq !== 0) param = dot / lenSq
+
+          let xx, yy
+
+          if (param < 0) {
+            xx = x1
+            yy = y1
+          } else if (param > 1) {
+            xx = x2
+            yy = y2
+          } else {
+            xx = x1 + param * C
+            yy = y1 + param * D
+          }
+
+          const dx = x - xx
+          const dy = y - yy
+          const distance = Math.sqrt(dx * dx + dy * dy)
+
+          return distance < 10
+        }
+
+        return false
+      })
+
+      if (elementToErase !== -1) {
+        const newElements = [...elements]
+        newElements.splice(elementToErase, 1)
+        setElements(newElements)
+      }
+
+      return
+    }
 
     if (tool === "select" && selectedElement) {
       // Move the selected element
@@ -506,14 +726,114 @@ export default function Whiteboard() {
     tempCtx.fillStyle = "white"
     tempCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height)
 
-    // Draw all elements
-    drawElements(tempCtx, elements)
+    // Create a promise for each image to load
+    const imagePromises: Promise<void>[] = []
 
-    // Create download link
-    const link = document.createElement("a")
-    link.download = "whiteboard.png"
-    link.href = tempCanvas.toDataURL("image/png")
-    link.click()
+    elements.forEach((element) => {
+      if (element.type === "image" && element.imageUrl) {
+        const promise = new Promise<void>((resolve) => {
+          const img = new Image()
+          img.src = element.imageUrl
+          img.crossOrigin = "anonymous"
+          img.onload = () => {
+            if (
+              element.x !== undefined &&
+              element.y !== undefined &&
+              element.width !== undefined &&
+              element.height !== undefined
+            ) {
+              tempCtx.drawImage(img, element.x, element.y, element.width, element.height)
+            }
+            resolve()
+          }
+          img.onerror = () => resolve() // Resolve even on error to continue
+        })
+
+        imagePromises.push(promise)
+      }
+    })
+
+    // Wait for all images to load, then draw the rest and download
+    Promise.all(imagePromises).then(() => {
+      // Draw all non-image elements
+      elements.forEach((element) => {
+        if (element.type !== "image") {
+          tempCtx.strokeStyle = element.color
+          tempCtx.lineWidth = element.lineWidth
+          tempCtx.fillStyle = element.color
+
+          switch (element.type) {
+            case "pencil":
+              if (!element.points || element.points.length < 2) return
+
+              tempCtx.beginPath()
+              tempCtx.moveTo(element.points[0].x, element.points[0].y)
+
+              for (let i = 1; i < element.points.length; i++) {
+                tempCtx.lineTo(element.points[i].x, element.points[i].y)
+              }
+
+              tempCtx.stroke()
+              break
+
+            case "rectangle":
+              if (
+                element.x === undefined ||
+                element.y === undefined ||
+                element.width === undefined ||
+                element.height === undefined
+              )
+                return
+
+              tempCtx.beginPath()
+              tempCtx.rect(element.x, element.y, element.width, element.height)
+              tempCtx.stroke()
+              break
+
+            case "circle":
+              if (
+                element.x === undefined ||
+                element.y === undefined ||
+                element.width === undefined ||
+                element.height === undefined
+              )
+                return
+
+              const radiusX = element.width / 2
+              const radiusY = element.height / 2
+              const centerX = element.x + radiusX
+              const centerY = element.y + radiusY
+
+              tempCtx.beginPath()
+              tempCtx.ellipse(centerX, centerY, radiusX, radiusY, 0, 0, 2 * Math.PI)
+              tempCtx.stroke()
+              break
+
+            case "line":
+              if (!element.points || element.points.length < 2) return
+
+              tempCtx.beginPath()
+              tempCtx.moveTo(element.points[0].x, element.points[0].y)
+              tempCtx.lineTo(element.points[1].x, element.points[1].y)
+              tempCtx.stroke()
+              break
+
+            case "text":
+              if (element.x === undefined || element.y === undefined || element.text === undefined) return
+
+              tempCtx.font = `${element.fontSize || 16}px ${element.fontFamily || "Arial"}`
+              tempCtx.fillText(element.text, element.x, element.y)
+              break
+          }
+        }
+      })
+
+      // Create download link
+      const link = document.createElement("a")
+      link.download = "whiteboard.png"
+      link.href = tempCanvas.toDataURL("image/png")
+      link.click()
+    })
   }
 
   // Handle image upload
@@ -543,6 +863,14 @@ export default function Whiteboard() {
             <Pencil className="h-4 w-4" />
           </Button>
           <Button
+            variant={tool === "eraser" ? "default" : "outline"}
+            size="icon"
+            onClick={() => setTool("eraser")}
+            title="Eraser"
+          >
+            <Eraser className="h-4 w-4" />
+          </Button>
+          <Button
             variant={tool === "line" ? "default" : "outline"}
             size="icon"
             onClick={() => setTool("line")}
@@ -566,6 +894,14 @@ export default function Whiteboard() {
           >
             <Circle className="h-4 w-4" />
           </Button>
+          <Button
+            variant={tool === "text" ? "default" : "outline"}
+            size="icon"
+            onClick={() => setTool("text")}
+            title="Text"
+          >
+            <Type className="h-4 w-4" />
+          </Button>
           <ImageUploader onImageUpload={handleImageUpload}>
             <Button variant={tool === "image" ? "default" : "outline"} size="icon" title="Image">
               <ImageIcon className="h-4 w-4" />
@@ -579,6 +915,31 @@ export default function Whiteboard() {
             <div className="w-24">
               <Slider value={lineWidth} min={1} max={20} step={1} onValueChange={setLineWidth} />
             </div>
+            {tool === "text" && (
+              <>
+                <div className="w-20">
+                  <Slider
+                    value={[fontSize]}
+                    min={8}
+                    max={72}
+                    step={1}
+                    onValueChange={(value) => setFontSize(value[0])}
+                  />
+                </div>
+                <Select value={fontFamily} onValueChange={setFontFamily}>
+                  <SelectTrigger className="w-24">
+                    <SelectValue placeholder="Font" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="Arial">Arial</SelectItem>
+                    <SelectItem value="Times New Roman">Times</SelectItem>
+                    <SelectItem value="Courier New">Courier</SelectItem>
+                    <SelectItem value="Georgia">Georgia</SelectItem>
+                    <SelectItem value="Verdana">Verdana</SelectItem>
+                  </SelectContent>
+                </Select>
+              </>
+            )}
           </div>
         </div>
 
@@ -614,6 +975,31 @@ export default function Whiteboard() {
           onMouseUp={handleMouseUp}
           onMouseLeave={handleMouseUp}
         />
+
+        {showTextInput && textPosition && (
+          <div
+            className="absolute z-10"
+            style={{
+              left: textPosition.x,
+              top: textPosition.y - fontSize,
+              minWidth: "100px",
+            }}
+          >
+            <textarea
+              ref={textInputRef}
+              value={textInput}
+              onChange={handleTextInputChange}
+              onBlur={handleTextInputBlur}
+              className="p-1 border border-gray-300 bg-white rounded"
+              style={{
+                fontSize: `${fontSize}px`,
+                fontFamily,
+                color,
+              }}
+              autoFocus
+            />
+          </div>
+        )}
       </div>
     </div>
   )
