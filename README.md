@@ -1,1 +1,1 @@
-Real Time whiteboard using gRPC websokets based on goLang backend
+Real Time collaborative whiteboard using gRPC websokets based on goLang backend
